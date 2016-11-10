@@ -347,6 +347,127 @@ func TestCreateUpdateFetchOneValue(t *testing.T) {
 	}
 }
 
+type FetchTest struct {
+	path           string
+	name           string
+	now            int
+	from           int
+	until          int
+	createWhisper  bool
+	fillWhisper    bool
+	errIsNil       bool
+	dataIsNil      bool
+	expectedStep   int
+	expectedErr    string
+	expectedValues []float64
+}
+
+type WhisperResult struct {
+	StepTime int
+	Values   []float64
+}
+
+func testWithWhisper(testData FetchTest) (*WhisperResult, error) {
+	var wsp *Whisper
+	var p []*TimeSeriesPoint
+	var res WhisperResult
+	retentions, err := ParseRetentionDefs("1m:10m,2m:30m")
+	path := testData.path + testData.name + ".wsp"
+	if testData.createWhisper {
+		wsp, err = Create(path, retentions, Max, 1.0)
+		if err != nil {
+			return nil, err
+		}
+		defer os.Remove(path)
+		val := float64(0.0)
+		if testData.fillWhisper {
+			for i := testData.from; i < testData.now-120; i += 60 {
+				p = append(p, &TimeSeriesPoint{i, val})
+				val += 10
+			}
+			err := wsp.UpdateMany(p)
+			if err != nil {
+				return nil, err
+			}
+		}
+		wsp.Close()
+	}
+	w, err := Open(path)
+	if err != nil {
+		return nil, err
+	}
+	points, err := w.Fetch(testData.from, testData.until)
+	if err != nil {
+		return nil, err
+	}
+	w.Close()
+	res.Values = points.Values()
+	res.StepTime = points.Step()
+	return &res, nil
+}
+
+func TestCrossRetention(t *testing.T) {
+	now := int(time.Now().Unix())
+	now = now - now%120
+	precision := 0.000001
+	path, err := ioutil.TempDir("", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(path)
+	path += "/"
+	tests := []FetchTest{
+		{
+			path:           path,
+			name:           "cross-retention",
+			createWhisper:  true,
+			fillWhisper:    true,
+			now:            now,
+			from:           now - 1200,
+			until:          now,
+			errIsNil:       true,
+			dataIsNil:      false,
+			expectedStep:   120,
+			expectedValues: []float64{30, 50, 70, 90, 110, 130, 150, 170, math.NaN(), math.NaN()},
+		},
+	}
+	for try := 0; try < 2; try++ {
+		for _, test := range tests {
+			fmt.Println("Performing test ", test.name)
+			data, err := testWithWhisper(test)
+			if !test.errIsNil {
+				if err == nil || err.Error() != test.expectedErr || (data == nil) != test.dataIsNil {
+					t.Errorf("err: '%v', expected: '%v'", err, test.expectedErr)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error: %v", err)
+					continue
+				}
+				if data == nil {
+					t.Errorf("Unexpected empty data")
+					continue
+				}
+				fmt.Printf("%+v\n\n", data)
+				if data.StepTime != test.expectedStep {
+					t.Errorf("Unepxected step: '%v', expected: '%v'\n", data.StepTime, test.expectedStep)
+					continue
+				}
+				if len(test.expectedValues) != len(data.Values) {
+					t.Errorf("Unexpected amount of data in return. Got %v, expected %v", len(data.Values), len(test.expectedValues))
+					continue
+				}
+				for i := range test.expectedValues {
+					if math.Abs(test.expectedValues[i]-data.Values[i]) > precision {
+						t.Errorf("test=%v, position %v, got %v, expected %v", test.name, i, data.Values[i], test.expectedValues[i])
+					}
+				}
+			}
+			time.Sleep(1 * time.Minute)
+		}
+	}
+}
+
 func BenchmarkCreateUpdateFetch(b *testing.B) {
 	path, _, archiveList, tearDown := setUpCreate()
 	var err error
